@@ -69,29 +69,41 @@ def test_non_bodyguard_has_no_enter_exerted_variant():
 
 
 # --- Audit 5.4: dead CardInstance.is_dry duplicates GameState.is_dry ---------
+# The method now takes the controller's turns_started (not the old two-argument
+# form). It is still dead code - nothing in lorcana/, bots/ or self_play.py calls
+# it - so this test only pins that it agrees with the live GameState.is_dry.
 @pytest.mark.skipif(not hasattr(CardInstance, "is_dry"),
                     reason="dead CardInstance.is_dry already removed (milestone 3)")
+@pytest.mark.parametrize("started", [0, 1, 2, 3])
 @pytest.mark.parametrize("entered", [None, 0, 1, 2])
-def test_dead_is_dry_agrees_with_live_one(entered):
+def test_dead_is_dry_agrees_with_live_one(entered, started):
     s = make_state()
-    s.turn_number = 1
     iid = put(s, 0, FILLER_ID, "play")
     inst = s.instances[iid]
     inst.entered_play_turn = entered
-    assert inst.is_dry(s.turn_number, True) == s.is_dry(iid)
+    s.players[0].turns_started = started
+    assert inst.is_dry(started) == s.is_dry(iid)
 
 
-# --- Audit 7: hidden information is unimplemented ----------------------------
-def test_documents_current_behavior_hidden_info_flags_do_nothing():
+# --- Audit 7: hidden information ---------------------------------------------
+# CHANGED ON PURPOSE (codex-work merge): GameConfig now defaults to HIDDEN
+# (open_hands = open_decks = False). The engine still never calls view_for();
+# SearchBot reads the config flags directly and samples hidden cards.
+def test_default_config_hides_hands_and_decks():
+    cfg = GameConfig()
+    assert cfg.open_hands is False and cfg.open_decks is False
+
+
+def test_documents_current_behavior_hidden_info_flags_do_not_change_legal_actions():
     """open_hands/open_decks only change view_for(); the engine never calls it."""
     assert "view_for" not in inspect.getsource(engine)
     a = make_state()
+    a.config.open_hands = a.config.open_decks = True
     b = make_state()
     b.config.open_hands = b.config.open_decks = False
     assert engine.legal_actions(a) == engine.legal_actions(b)
-    # view_for itself does redact when asked:
-    assert isinstance(b.view_for(0)["opp_hand"], int)
-    assert isinstance(a.view_for(0)["opp_hand"], list)
+    assert isinstance(b.view_for(0)["opp_hand"], int)    # redacted: a count
+    assert isinstance(a.view_for(0)["opp_hand"], list)   # open: card list
 
 
 # --- Audit 9: unscripted cards are silent no-ops -----------------------------
