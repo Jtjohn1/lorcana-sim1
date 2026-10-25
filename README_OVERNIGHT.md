@@ -1,13 +1,14 @@
 # Overnight kit - setup (Windows, PowerShell)
 
-Extract this zip INTO your project root (the folder that contains `lorcana\`, `bots\`, `tests\`).
-You get: overnight_runner.py, AGENT_RULES.md, tasks\ (4 task files), this README.
+This kit lives in the project root (the folder that contains `lorcana\`, `bots\`, `tests\`).
+Files: overnight_runner.py, AGENT_RULES.md, tasks\ (5 task files), this README.
+Tasks run in file-name order. Task 05 expects task 02 to have run first.
 
 ## One-time setup
 1. Make sure the project is a git repo and everything is committed:
        git status
    (if "not a git repository":  git init ; git add -A ; git commit -m "baseline")
-2. Add `runs/` to .gitignore (the runner writes its logs there), then commit.
+2. `runs/` is already in .gitignore (the runner writes its logs there).
 3. Install the two agent CLIs and log in to each ONCE, interactively, so they don't
    stop to ask for a login at 3 a.m. Follow each tool's current install docs:
      - Claude Code  (command: claude)
@@ -32,7 +33,7 @@ Power & sleep to "Never" while plugged in. Do not close the terminal.
 - runs\<stamp>\summary.md (also copied into Obsidian): what was KEPT / REVERTED and why,
   plus each agent's DONE / QUESTIONS notes.
 - Each agent has its own branch: overnight/<stamp>/claude and overnight/<stamp>/codex.
-  Compare:  git diff master..overnight/<stamp>/claude   (use your branch name)
+  Compare:  git diff main..overnight/<stamp>/claude   (use your branch name)
   Merge only what you've reviewed. Answer the QUESTIONS before anything rules-related.
 
 ## What protects you

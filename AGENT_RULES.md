@@ -4,7 +4,7 @@ You are one of two coding agents (Claude, Codex) working unattended overnight, e
 its own git worktree. A human reviews both results in the morning. Your work is kept
 only if the automated gate passes; otherwise it is thrown away.
 
-## Project charter (from PROJECT_STATUS.md, decided by the owner)
+## Project charter (from PROJECT_STATUS.md, decided by the owner; read it and PROJECT_AUDIT.md too)
 Priority order: rules correctness > game-state correctness > automated tests > card
 effects > search correctness > performance > learned AI > deck optimization.
 The AI is downstream of the simulator. Do not do AI work.
@@ -32,9 +32,15 @@ The AI is downstream of the simulator. Do not do AI work.
 9. Windows environment: run Python as `python`, write paths with forward slashes.
 10. Be honest. Do not say tests pass unless you ran them and saw them pass.
 
+## Verified Lorcana facts (do not contradict these; do not guess others)
+- Core Constructed deck: at least 60 cards (no maximum), at most 4 copies per full name,
+  at most 2 ink colours. A dual-ink card needs BOTH of its inks in the deck.
+- The Comprehensive Rules text is NOT in this repo. Any other rule you are unsure of goes in QUESTIONS.
+
 ## How to verify
 Run `python -m pytest -q --ignore=lorcana/nn` from the repository root. ALL existing
-tests must still pass (38 at the start), plus your new ones.
+tests must still pass (132 at the time of writing; the runner prints the real baseline),
+plus your new ones. A task may delete tests only if its file says ALLOWED_TEST_DROP.
 If you get stuck after reasonable effort, stop. Leaving the repo unchanged and
 explaining why is a perfectly good outcome.
 

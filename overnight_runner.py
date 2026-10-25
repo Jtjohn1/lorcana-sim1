@@ -111,6 +111,18 @@ def parse_allow_edit(task_path: Path):
     return set()
 
 
+def parse_allowed_drop(task_path: Path) -> int:
+    """Optional header `ALLOWED_TEST_DROP: N` lets a task delete up to N passing tests
+    (for example when it removes dead code and the test that only covered it)."""
+    for line in task_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("ALLOWED_TEST_DROP:"):
+            try:
+                return max(0, int(line.split(":", 1)[1].strip()))
+            except ValueError:
+                return 0
+    return 0
+
+
 def check_changes(wt: Path, before: str, allow: set):
     """Stage everything, compare to `before`. Returns (changed_files, violations)."""
     git(["add", "-A"], wt)
@@ -175,6 +187,7 @@ def run_task(agent, cmd_t, wt, task, baseline, timeout_s, run_dir, push, branch,
     _, before = git(["rev-parse", "HEAD"], wt)
     before = before.strip()
     allow = parse_allow_edit(wt / task)
+    allowed_drop = parse_allowed_drop(wt / task)
     prompt = PROMPT.format(task=task)
     cmd = [prompt if a == "{prompt}" else a for a in cmd_t]
 
@@ -210,9 +223,10 @@ def run_task(agent, cmd_t, wt, task, baseline, timeout_s, run_dir, push, branch,
     if not ok:
         revert()
         return finish("REVERTED", passed, "tests failed after agent's change")
-    if passed < baseline:
+    if passed < baseline - allowed_drop:
         revert()
-        return finish("REVERTED", passed, f"fewer passing tests than baseline ({baseline})")
+        return finish("REVERTED", passed,
+                      f"fewer passing tests than baseline ({baseline}, allowed drop {allowed_drop})")
 
     rc, _ = git(["diff", "--cached", "--quiet"], wt)
     if rc != 0:  # staged changes not yet committed (agent did not commit itself)
