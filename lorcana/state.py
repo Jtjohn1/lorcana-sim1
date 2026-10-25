@@ -20,10 +20,10 @@ Zone = str  # "deck" | "hand" | "play" | "inkwell" | "discard"
 
 @dataclass
 class GameConfig:
-    open_hands: bool = True   # if True, each player's view includes the opponent's hand
-    open_decks: bool = True   # if True, each player's view includes full deck order (both decks)
+    open_hands: bool = False   # if True, each player's view includes the opponent's hand
+    open_decks: bool = False   # if True, each player's view includes full deck order (both decks)
     starting_hand_size: int = 7
-    allow_mulligan: bool = False  # MVP: no mulligan step yet (see README "Known gaps")
+    allow_mulligan: bool = True  # opening-hand replacement is part of setup
 
 
 @dataclass
@@ -36,18 +36,17 @@ class CardInstance:
     zone: Zone
     exerted: bool = False
     damage: int = 0
-    entered_play_turn: int | None = None  # turn_number this became "dry" from
+    entered_play_turn: int | None = None  # controller turn number when this card entered play
     at_location: int | None = None  # instance_id of the location it's at, if any
-    stacked_on: int | None = None  # instance_id this is Shifted onto (None = base of stack)
-    stacked_under: list[int] = field(default_factory=list)  # instance_ids under this one, bottom->top
+    stacked_on: int | None = None  # instance_id of the card on top of this one (None = top of stack)
+    stacked_under: list[int] = field(default_factory=list)  # flattened ids beneath this card, nearest first
     boosted_under: int | None = None  # instance_id of the character this is tucked under (Boost)
 
-    def is_dry(self, current_turn: int, controller_turn_started: bool) -> bool:
-        """A character is dry once it's been in play since the start of its
-        controller's turn (see Comprehensive Rules 1.7.5 / 5.1.1.12)."""
+    def is_dry(self, controller_turns_started: int) -> bool:
+        """A character dries at the start of its controller's next turn."""
         if self.entered_play_turn is None:
             return False
-        return self.entered_play_turn < current_turn
+        return self.entered_play_turn < controller_turns_started
 
 
 @dataclass
@@ -58,10 +57,12 @@ class PlayerState:
     hand: list[int] = field(default_factory=list)
     play: list[int] = field(default_factory=list)
     inkwell: list[int] = field(default_factory=list)
+    ink_drops: int = 0  # single-use counters; not card instances
     discard: list[int] = field(default_factory=list)
     under: list[int] = field(default_factory=list)  # cards put "under" a character (e.g. Boost)
     lore: int = 0
     inked_this_turn: bool = False
+    turns_started: int = 0  # number of times this player's Start step has begun
 
 
 class GameState:
@@ -73,11 +74,16 @@ class GameState:
         self.instances: dict[int, CardInstance] = {}
         self._next_instance_id = 1
         self.active_idx = 0
+        self.first_player_idx = 0
         self.turn_number = 1
         self.phase = "setup"  # setup | start_of_turn | main | end_of_turn | game_over
         self.winner: int | None = None
         self.log: list[str] = []
         self.pending_singer_alt_cost: dict | None = None  # scratch space used mid-action
+        self.triggered_bag: list[dict] = []
+        self.once_per_turn_trigger_usage: dict[tuple[int, str], int] = {}
+        self.once_per_turn_activated_usage: dict[tuple[int, str], int] = {}
+        self.cards_discarded_this_turn: dict[int, int] = {0: 0, 1: 0}
 
         # Temporary "this turn" Strength modifiers (e.g. from Support). Cleared
         # at the end of the active player's turn. Keyed by instance_id.
@@ -87,6 +93,10 @@ class GameState:
         # than the above — they survive the opponent's whole turn). Each entry:
         # {"iid":, "amount":, "owner": player_idx whose next turn clears it}.
         self.delayed_strength_mods: list[dict] = []
+        # Temporary Challenger/Resist bonuses expire at the controller next start.
+        self.delayed_challenger_mods: list[dict] = []
+        self.delayed_resist_mods: list[dict] = []
+        self.temp_challenger_bonus: dict[int, int] = {}
 
         # "You pay N less for the next character you play this turn" pool.
         # Stacks additively from multiple sources (Grandmother Willow-style
@@ -109,6 +119,10 @@ class GameState:
         # Once-per-character-per-turn tracking for the Boost keyword.
         self.boost_used_this_turn: set[int] = set()
 
+        # Temporary Shift cards return to their owner's hand at end of turn
+        # if they are still anywhere in a stack in play.
+        self.temporary_shift_iids: set[int] = set()
+
         # Optional hook for sub-decisions made mid-effect-resolution (e.g. "which
         # character does Support boost?"). Signature: fn(state, player_idx, kind,
         # options) -> one of options. If unset, falls back to a random choice —
@@ -117,18 +131,33 @@ class GameState:
         self.decision_maker = None
 
     def choose(self, player_idx: int, kind: str, options: list):
-        if not options:
+        # Ward prevents an opponent from choosing a character while resolving
+        # an effect. It does not prevent challenges or effects that choose no
+        # individual target.
+        legal_options = []
+        for option in options:
+            if type(option) is int and option in self.instances:
+                inst = self.instances[option]
+                if (
+                    inst.owner != player_idx and inst.zone == "play"
+                    and inst.stacked_on is None and self.card_of(option).has_keyword("Ward")
+                ):
+                    continue
+            legal_options.append(option)
+        if not legal_options:
             return None
         if self.decision_maker is not None:
-            return self.decision_maker(self, player_idx, kind, options)
-        return self.rng.choice(options)
+            choice = self.decision_maker(self, player_idx, kind, legal_options)
+        else:
+            choice = self.rng.choice(legal_options)
+        return choice
 
     # --- fast cloning for search --------------------------------------------
     def clone(self) -> "GameState":
         """A cheap copy for game-tree search: shares immutable/shared data
         (the card database, config) by reference, and independently copies
         everything the engine actually mutates during play. Using
-        `copy.deepcopy` here would also recursively copy the ~1,300-card
+        `copy.deepcopy` here would also recursively copy the ~1,558-card
         database on every simulated move — far too slow for search. Keep
         this in sync with `__init__` whenever a new mutable field is added
         there."""
@@ -141,8 +170,10 @@ class GameState:
             PlayerState(
                 player_id=p.player_id, name=p.name,
                 deck=list(p.deck), hand=list(p.hand), play=list(p.play),
-                inkwell=list(p.inkwell), discard=list(p.discard), under=list(p.under),
+                inkwell=list(p.inkwell), ink_drops=p.ink_drops,
+                discard=list(p.discard), under=list(p.under),
                 lore=p.lore, inked_this_turn=p.inked_this_turn,
+                turns_started=p.turns_started,
             )
             for p in self.players
         ]
@@ -163,17 +194,28 @@ class GameState:
             new.instances[iid] = new_inst
         new._next_instance_id = self._next_instance_id
         new.active_idx = self.active_idx
+        new.first_player_idx = self.first_player_idx
         new.turn_number = self.turn_number
         new.phase = self.phase
         new.winner = self.winner
         new.log = []  # not needed for search; keeps clones cheap
         new.pending_singer_alt_cost = dict(self.pending_singer_alt_cost) if self.pending_singer_alt_cost else None
+        new.triggered_bag = [
+            {**trigger, "ctx": dict(trigger["ctx"])} for trigger in self.triggered_bag
+        ]
+        new.once_per_turn_trigger_usage = dict(self.once_per_turn_trigger_usage)
+        new.once_per_turn_activated_usage = dict(self.once_per_turn_activated_usage)
+        new.cards_discarded_this_turn = dict(self.cards_discarded_this_turn)
         new.temp_strength_bonus = dict(self.temp_strength_bonus)
         new.delayed_strength_mods = list(self.delayed_strength_mods)
+        new.delayed_challenger_mods = list(self.delayed_challenger_mods)
+        new.delayed_resist_mods = list(self.delayed_resist_mods)
+        new.temp_challenger_bonus = dict(self.temp_challenger_bonus)
         new.next_character_discount = self.next_character_discount
         new.global_no_challenge_until_owner = self.global_no_challenge_until_owner
         new.active_player_challenged_this_turn = self.active_player_challenged_this_turn
         new.boost_used_this_turn = set(self.boost_used_this_turn)
+        new.temporary_shift_iids = set(self.temporary_shift_iids)
         new.decision_maker = self.decision_maker
         return new
 
@@ -206,6 +248,30 @@ class GameState:
     def move_zone(self, instance_id: int, new_zone: Zone) -> None:
         inst = self.instances[instance_id]
         owner = self.players[inst.owner]
+        old_zone = inst.zone
+        if new_zone == "discard" and old_zone != "discard":
+            self.cards_discarded_this_turn[inst.owner] += 1
+        if inst.zone == "play" and new_zone != "play":
+            self.temp_strength_bonus.pop(instance_id, None)
+            self.temp_challenger_bonus.pop(instance_id, None)
+            self.delayed_strength_mods = [m for m in self.delayed_strength_mods if m["iid"] != instance_id]
+            self.delayed_challenger_mods = [m for m in self.delayed_challenger_mods if m["iid"] != instance_id]
+            self.delayed_resist_mods = [m for m in self.delayed_resist_mods if m["iid"] != instance_id]
+            self.once_per_turn_trigger_usage = {
+                key: turn for key, turn in self.once_per_turn_trigger_usage.items()
+                if key[0] != instance_id
+            }
+            self.once_per_turn_activated_usage = {
+                key: turn for key, turn in self.once_per_turn_activated_usage.items()
+                if key[0] != instance_id
+            }
+        if (
+            inst.zone == "play" and new_zone != "play"
+            and self.card_of(instance_id).type == "Location"
+        ):
+            for other in self.instances.values():
+                if other.at_location == instance_id:
+                    other.at_location = None
         for zone_name in ("deck", "hand", "play", "inkwell", "discard", "under"):
             lst = getattr(owner, zone_name)
             if instance_id in lst:
@@ -226,7 +292,8 @@ class GameState:
         inst = self.instances[instance_id]
         if inst.entered_play_turn is None:
             return False
-        return inst.entered_play_turn < self.turn_number
+        owner_turns_started = self.players[inst.owner].turns_started
+        return inst.entered_play_turn < owner_turns_started
 
     def characters_in_play(self, player_idx: int) -> list[int]:
         card_db = self.db
@@ -242,7 +309,8 @@ class GameState:
     def locations_in_play(self, player_idx: int) -> list[int]:
         return [
             iid for iid in self.players[player_idx].play
-            if self.db.get(self.instances[iid].card_id).type == "Location"
+            if self.instances[iid].stacked_on is None
+            and self.db.get(self.instances[iid].card_id).type == "Location"
         ]
 
     # --- visibility / views --------------------------------------------
@@ -278,6 +346,8 @@ class GameState:
             "opp_play": [self._describe(i) for i in opp.play],
             "your_discard": [self.card_of(i).full_name for i in me.discard],
             "opp_discard": [self.card_of(i).full_name for i in opp.discard],
+            "your_ink_drops": me.ink_drops,
+            "opp_ink_drops": opp.ink_drops,
         }
 
     def _describe(self, iid: int) -> dict:
@@ -288,4 +358,6 @@ class GameState:
             "exerted": inst.exerted,
             "damage": inst.damage,
             "dry": self.is_dry(iid),
+            "stacked_on": self.card_of(inst.stacked_on).full_name if inst.stacked_on is not None else None,
+            "stacked_under": [self.card_of(card_iid).full_name for card_iid in inst.stacked_under],
         }

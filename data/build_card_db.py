@@ -60,7 +60,7 @@ def normalize_ability(a: dict) -> dict:
 
 
 def main() -> None:
-    raw_files = sorted(RAW_DIR.glob("setdata_*.json"))
+    raw_files = sorted(RAW_DIR.glob("setdata_*.json"), key=lambda path: int(path.stem.rsplit("_", 1)[1]))
     if not raw_files:
         raise SystemExit(f"No setdata_*.json files found in {RAW_DIR}")
 

@@ -102,12 +102,10 @@ class Card:
         return self.has_keyword("Shift")
 
     def shift_targets(self) -> tuple[str, ...]:
-        """Character name(s) this card can Shift onto, best-effort from ability text.
+        """Return the card's own base name as a simple Shift hint.
 
-        LorcanaJSON doesn't give this as structured data, so we fall back to the
-        card's own base name (the common case: Name - Version shifts onto other
-        cards named Name). Named Shifts (e.g. onto a specific different character)
-        are flagged as unsupported by the engine for now.
+        This is not authoritative for named or multi-name Shift abilities;
+        the engine parses those ability texts when it builds legal actions.
         """
         return (self.name,)
 

@@ -9,7 +9,10 @@ eye — run this before trusting the engine for any real training.
 from __future__ import annotations
 
 import numpy as np
-from autodiff import Tensor
+try:
+    from .autodiff import Tensor
+except ImportError:  # Also allow running this file directly.
+    from autodiff import Tensor
 
 np.random.seed(0)
 EPS = 1e-5

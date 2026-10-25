@@ -1,22 +1,24 @@
 """Deck mutation utilities, deliberately scoped to a known-safe card pool.
 
-Per project decision: rather than opening deck construction to the full
-~1,300-card database — most of which has no scripted abilities yet, so
-an "optimized" deck built from it would really just be optimizing over
-which cards happen to behave as no-ops least often — the mutation pool
-is restricted to cards already proven out in data/decklists/deck1.txt
-and deck2.txt: every one of them either uses a generic keyword the
-engine fully implements, or has a real handler in card_effects.py. If
-you script more decks later, add their paths to the pool build call
-and the same safety property holds — the pool is only ever exactly
-"cards this engine actually understands," not "all legal cards."
+Only cards whose modeled keywords and structured abilities all have an
+engine resolver enter the default mutation pool. This prevents deck
+evolution from rewarding cards whose printed effects silently do nothing.
 """
 from __future__ import annotations
 
 import random
 
 from .cards import Card, CardDatabase
+from .coverage import is_card_effect_supported
 from .decklist import parse_decklist_text
+
+
+def build_supported_card_pool(db: CardDatabase) -> list[Card]:
+    """All database cards whose parsed text has a registered resolver."""
+    return sorted(
+        (card for card in db.all_cards() if is_card_effect_supported(card)),
+        key=lambda card: card.id,
+    )
 
 
 def build_card_pool(db: CardDatabase, decklist_paths: list[str]) -> list[Card]:
@@ -31,12 +33,43 @@ def build_card_pool(db: CardDatabase, decklist_paths: list[str]) -> list[Card]:
             card = db.find_by_full_name(name)
             if card is None:
                 raise ValueError(f"Pool card not found in database: {name}")
-            seen[name] = card
+            if is_card_effect_supported(card):
+                seen[name] = card
     return list(seen.values())
 
 
+def card_colors(card: Card) -> set[str]:
+    """Return each ink color represented by a mono- or dual-ink card."""
+    return set(card.color.split("-")) if card.color else set()
+
+
 def deck_colors(db: CardDatabase, deck_card_ids: list[int]) -> set[str]:
-    return {db.get(cid).color for cid in deck_card_ids if db.get(cid).color}
+    colors: set[str] = set()
+    for cid in deck_card_ids:
+        colors.update(card_colors(db.get(cid)))
+    return colors
+
+
+def validate_deck(
+    db: CardDatabase,
+    deck_card_ids: list[int],
+    *,
+    minimum_size: int = 60,
+    max_copies: int = 4,
+    max_ink_colors: int = 2,
+) -> None:
+    """Raise ValueError if a deck violates core constructed deck limits."""
+    if len(deck_card_ids) < minimum_size:
+        raise ValueError(f"Deck has {len(deck_card_ids)} cards; minimum is {minimum_size}")
+    colors = deck_colors(db, deck_card_ids)
+    if len(colors) > max_ink_colors:
+        raise ValueError(f"Deck has {len(colors)} ink colors; maximum is {max_ink_colors}")
+    counts: dict[str, int] = {}
+    for cid in deck_card_ids:
+        card = db.get(cid)
+        counts[card.full_name] = counts.get(card.full_name, 0) + 1
+        if counts[card.full_name] > max_copies:
+            raise ValueError(f"Deck has more than {max_copies} copies of {card.full_name}")
 
 
 def mutate_deck(
@@ -47,29 +80,32 @@ def mutate_deck(
     num_mutations: int = 1,
     max_copies: int = 4,
 ) -> list[int]:
-    """Returns a new deck (same size) with `num_mutations` single-card swaps:
-    remove one copy of a card currently in the deck, add one copy of a pool
-    card. Restricted to the deck's OWN current ink colors (computed from the
-    deck itself, not the whole pool), so a mutation can never produce an
-    illegal 3-color deck even though the pool spans more than 2 colors
-    combined across deck1/deck2."""
+    """Return a same-size legal deck after up to `num_mutations` card swaps.
+
+    Candidates are restricted to the deck's current ink colors. The source
+    deck is checked first, and copy counts are enforced by full card name.
+    """
     deck = list(deck_card_ids)
+    validate_deck(db, deck, minimum_size=0, max_copies=max_copies)
+    if not deck:
+        return deck
     allowed_colors = deck_colors(db, deck)
-    eligible_pool = [c for c in pool if c.color in allowed_colors]
+    eligible_pool = [card for card in pool if card_colors(card) <= allowed_colors]
 
     for _ in range(num_mutations):
-        counts: dict[int, int] = {}
-        for cid in deck:
-            counts[cid] = counts.get(cid, 0) + 1
-
         remove_cid = rng.choice(deck)
         deck.remove(remove_cid)
+        counts: dict[str, int] = {}
+        for cid in deck:
+            card_name = db.get(cid).full_name
+            counts[card_name] = counts.get(card_name, 0) + 1
 
-        candidates = [c for c in eligible_pool if counts.get(c.id, 0) < max_copies]
+        candidates = [card for card in eligible_pool if counts.get(card.full_name, 0) < max_copies]
         if not candidates:
             deck.append(remove_cid)  # no legal swap available; put it back unchanged
             continue
         add_card = rng.choice(candidates)
         deck.append(add_card.id)
 
+    validate_deck(db, deck, minimum_size=0, max_copies=max_copies)
     return deck

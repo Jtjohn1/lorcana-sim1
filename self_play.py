@@ -52,10 +52,27 @@ BOT_TYPES = {
 }
 
 
-def run_one_game(db: CardDatabase, rng: random.Random, bot_a, bot_b, verbose: bool = False,
-                  deck_a_path: str | None = None, deck_b_path: str | None = None):
-    deck_a = load_decklist(db, deck_a_path) if deck_a_path else build_random_deck(db, rng)
-    deck_b = load_decklist(db, deck_b_path) if deck_b_path else build_random_deck(db, rng)
+def run_one_game(
+    db: CardDatabase,
+    rng: random.Random,
+    bot_a,
+    bot_b,
+    verbose: bool = False,
+    deck_a_path: str | None = None,
+    deck_b_path: str | None = None,
+    deck_a_card_ids: list[int] | None = None,
+    deck_b_card_ids: list[int] | None = None,
+):
+    deck_a = (
+        list(deck_a_card_ids) if deck_a_card_ids is not None
+        else load_decklist(db, deck_a_path) if deck_a_path
+        else build_random_deck(db, rng)
+    )
+    deck_b = (
+        list(deck_b_card_ids) if deck_b_card_ids is not None
+        else load_decklist(db, deck_b_path) if deck_b_path
+        else build_random_deck(db, rng)
+    )
     state = new_game(db, deck_a, deck_b, config=GameConfig(), seed=rng.randrange(1 << 30))
 
     bots = [bot_a, bot_b]

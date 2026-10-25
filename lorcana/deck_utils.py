@@ -31,7 +31,11 @@ def build_random_deck(
     if colors is None:
         colors = tuple(rng.sample(INK_COLORS, 2))
 
-    pool = [c for c in db.all_cards() if c.color in colors]
+    allowed_colors = set(colors)
+    pool = [
+        c for c in db.all_cards()
+        if c.color and set(c.color.split("-")) <= allowed_colors
+    ]
     rng.shuffle(pool)
 
     counts: dict[str, int] = {}
