@@ -1,12 +1,12 @@
 """Card-specific effect implementations, registered into engine.py's
 extension-point dictionaries.
 
-Scope: every unique card across the two decklists provided in-session
-(see /areas/lorcana-simulator project notes) that isn't already covered
-by a generic keyword (Support, Challenger, Rush, Evasive, Bodyguard,
-Shift, Singer, Sing Together — those need nothing here). Import this
-module (it's imported by `lorcana/__init__.py`) to register everything
-below; nothing here runs until the engine calls into the registries.
+Scope: named handlers for card text that is not resolved by the engine's
+generic keyword and text templates. This is a growing subset of the full
+sets 9–14 database; `check_card_coverage.py` reports the cards that still
+need resolvers. Import this module (it's imported by `lorcana/__init__.py`)
+to register everything below; nothing here runs until the engine calls into
+the registries.
 
 A few cards' printed text was genuinely ambiguous when read literally out
 of the LorcanaJSON extraction; where that happened, the interpretation
@@ -154,19 +154,26 @@ def _demona_on_play(state: GameState, iid: int, **ctx) -> None:
 def _demona_stone_by_day(state: GameState, iid: int) -> bool:
     """STONE BY DAY: if you have 3+ cards in hand, this character can't ready."""
     owner = state.instances[iid].owner
+    if _angela_suppresses_stone_by_day(state, iid):
+        return False
     return len(state.players[owner].hand) >= 3
 
 
 def _dumbo_breaking_records(state: GameState, iid: int) -> None:
-    """BREAKING RECORDS: (activated) Draw a card and gain 1 lore."""
+    """Resolve either Dumbo activated ability: draw a card and gain 1 lore."""
     owner = state.instances[iid].owner
     E.draw_cards(state, owner, 1)
     state.players[owner].lore += 1
-    state.log_event(f"{state.card_of(iid).full_name}'s Breaking Records draws a card and gains 1 lore")
-    # NOTE: MAKING HISTORY (a static ability granting this same activated
-    # ability to the controller's OTHER Evasive characters) isn't wired —
-    # it would need per-instance ability grants, which no card in this pool
-    # needs elsewhere. See README.
+    state.log_event(f"{state.card_of(iid).full_name}'s activated ability draws a card and gains 1 lore")
+
+
+def _dumbo_making_history_grant(state: GameState, source_iid: int, target_iid: int):
+    if source_iid == target_iid or state.instances[target_iid].owner != state.instances[source_iid].owner:
+        return []
+    target = state.card_of(target_iid)
+    if target.type != "Character" or not target.has_keyword("Evasive"):
+        return []
+    return [{"name": "MAKING HISTORY", "costs": ("⟳", "1 ⬡")}]
 
 
 def _gaston_watch_this(state: GameState, iid: int, **ctx) -> None:
@@ -448,6 +455,81 @@ def _mike_find_a_friend(state: GameState, iid: int, **ctx) -> None:
     state.log_event(f"{state.card_of(iid).full_name}'s Find a Friend resolves for both players")
 
 
+def _chernabog_unatural_force(state: GameState, iid: int, **ctx) -> None:
+    """UNNATURAL FORCE: shuffle an opposing character away; its player may play a Character."""
+    owner = state.instances[iid].owner
+    opponent = state.opponent_idx(owner)
+    targets = state.characters_in_play(opponent)
+    target = state.choose(owner, "chernabog_target", targets)
+    if target is None:
+        return
+    affected_player = state.instances[target].owner
+    state.move_zone(target, "deck")
+    state.rng.shuffle(state.players[affected_player].deck)
+    options = [
+        card_iid for card_iid in state.players[affected_player].discard
+        if state.card_of(card_iid).type == "Character"
+    ]
+    if not options or not state.choose(
+        affected_player, f"chernabog_may_play:{affected_player}", [True, False]
+    ):
+        return
+    chosen = state.choose(affected_player, f"play_from_discard:{affected_player}", options)
+    if chosen is not None:
+        E.put_character_into_play_free(state, chosen)
+
+
+def _milo_getting_his_hands_dirty(state: GameState, iid: int, **ctx) -> None:
+    """GETTING HIS HANDS DIRTY: discard a card to return a chosen Character."""
+    owner = state.instances[iid].owner
+    targets = [
+        target for player_idx in (0, 1)
+        for target in state.characters_in_play(player_idx)
+        if not (
+            state.instances[target].owner != owner
+            and state.card_of(target).has_keyword("Ward")
+        )
+    ]
+    if not targets or not state.players[owner].hand:
+        return
+    if not state.choose(owner, f"may_discard_to_bounce:{owner}", [True, False]):
+        return
+    hand = list(state.players[owner].hand)
+    discarded = state.choose(owner, "discard_choice", hand)
+    if discarded not in hand:
+        return
+    state.move_zone(discarded, "discard")
+    targets = [
+        target for player_idx in (0, 1)
+        for target in state.characters_in_play(player_idx)
+        if not (
+            state.instances[target].owner != owner
+            and state.card_of(target).has_keyword("Ward")
+        )
+    ]
+    target = state.choose(owner, f"bounce_target:{owner}", targets)
+    if target is not None:
+        state.move_zone(target, "hand")
+
+
+def _milo_discard_recovery(state: GameState, iid: int, **ctx) -> None:
+    owner = state.instances[iid].owner
+    if state.cards_discarded_this_turn.get(owner, 0) >= 2:
+        E.draw_cards(state, owner, 1)
+        state.log_event(f"{state.card_of(iid).full_name} draws after two cards entered your discard")
+
+
+def _meilin_losing_control(state: GameState, iid: int, **ctx) -> None:
+    """LOSING CONTROL: look at four; take a Red Panda character or Song."""
+    owner = state.instances[iid].owner
+    _look_top_and_maybe_take(
+        state, owner, 4,
+        lambda card: (
+            card.type == "Character" and "Red Panda" in card.subtypes
+        ) or (card.type == "Action" and "Song" in card.subtypes),
+    )
+
+
 def _mowgli_have_a_better_look(state: GameState, iid: int, **ctx) -> None:
     """HAVE A BETTER LOOK: chosen opponent reveals hand and discards a
     non-character card OF THEIR CHOICE."""
@@ -507,6 +589,93 @@ def _ursula_deceiver_never_miss_it(state: GameState, iid: int, **ctx) -> None:
 # Registration
 # ---------------------------------------------------------------------------
 
+
+def _aladdin_doing_his_part(state: GameState, iid: int, **ctx) -> None:
+    owner = state.instances[iid].owner
+    items = [target for pidx in (0, 1) for target in state.players[pidx].play
+             if state.card_of(target).type == "Item" and state.instances[target].stacked_on is None]
+    player = state.players[owner]
+    ready_ink = sum(not state.instances[target].exerted for target in player.inkwell)
+    if not items or ready_ink + player.ink_drops < 1:
+        return
+    if not state.choose(owner, "aladdin_may_pay", [False, True]):
+        return
+    drops = 1 if ready_ink == 0 else 0
+    E._exert_ink(state, player, 1, drops)
+    target = state.choose(owner, f"aladdin_banish_item:{owner}", items)
+    if target is not None:
+        E.banish(state, target)
+
+
+def _angel_good_aim_legal(state: GameState, iid: int) -> bool:
+    owner = state.instances[iid].owner
+    if not state.players[owner].hand:
+        return False
+    for pidx in (0, 1):
+        for target in state.characters_in_play(pidx):
+            if pidx == owner or not state.card_of(target).has_keyword("Ward"):
+                return True
+    return False
+
+
+def _angel_good_aim(state: GameState, iid: int) -> None:
+    owner = state.instances[iid].owner
+    discarded = state.choose(owner, "discard_choice", list(state.players[owner].hand))
+    if discarded is None:
+        return
+    state.move_zone(discarded, "discard")
+    targets = state.characters_in_play(0) + state.characters_in_play(1)
+    target = state.choose(owner, f"action_damage_target:{owner}:2", targets)
+    if target is not None:
+        E.deal_damage(state, target, 2)
+
+
+def _angel_night_warrior(state: GameState, iid: int, **ctx) -> None:
+    owner = state.instances[iid].owner
+    targets = state.characters_in_play(0) + state.characters_in_play(1)
+    if not targets:
+        return
+    target = state.choose(owner, f"angela_challenger_resist_target:{owner}", [None] + targets)
+    if target is None:
+        return
+    state.delayed_challenger_mods.append({"iid": target, "amount": 2, "owner": owner})
+    state.delayed_resist_mods.append({"iid": target, "amount": 2, "owner": owner})
+
+
+def _rapunzel_tower_defender(state: GameState, iid: int, **ctx) -> None:
+    owner = state.instances[iid].owner
+    hand = list(state.players[owner].hand)
+    characters = state.characters_in_play(0) + state.characters_in_play(1)
+    if not hand or not characters:
+        return
+    discard = state.choose(owner, f"rapunzel_discard:{owner}", [None] + hand)
+    if discard is None:
+        return
+    state.move_zone(discard, "discard")
+    target = state.choose(owner, f"bounce_target:{owner}", characters)
+    if target is not None:
+        state.move_zone(target, "hand")
+        state.log_event(f"{state.card_of(iid).full_name} returns {state.card_of(target).full_name} to hand")
+
+
+def _launchpad_what_did_you_need(state: GameState, iid: int) -> None:
+    owner = state.instances[iid].owner
+    E.draw_cards(state, owner, 1)
+    has_darkwing = any(state.card_of(target).name == "Darkwing Duck" for target in state.characters_in_play(owner))
+    if not has_darkwing and state.players[owner].hand:
+        discarded = state.choose(owner, "discard_choice", list(state.players[owner].hand))
+        if discarded is not None:
+            state.move_zone(discarded, "discard")
+
+
+def _angela_suppresses_stone_by_day(state: GameState, iid: int) -> bool:
+    owner = state.instances[iid].owner
+    demona = state.card_of(iid)
+    if "Gargoyle" in demona.subtypes:
+        return any(state.card_of(target).name == "Angela" for target in E._permanents_in_play(state, owner))
+    return False
+
+
 def register() -> None:
     T = E.TRIGGERED_ABILITY_HANDLERS
     A = E.ACTION_EFFECT_HANDLERS
@@ -521,6 +690,8 @@ def register() -> None:
     T[("Demona - Scourge of the Wyvern Clan", "on_play")] = _demona_on_play
     RB["Demona - Scourge of the Wyvern Clan"] = _demona_stone_by_day
     ACT["BREAKING RECORDS"] = _dumbo_breaking_records
+    ACT["MAKING HISTORY"] = _dumbo_breaking_records
+    E.STATIC_GRANTED_ACTIVATED_ABILITIES["Dumbo - Ninth Wonder of the Universe"] = _dumbo_making_history_grant
     T[("Gaston - Superior Archer", "on_play")] = _gaston_watch_this
     _grandmother_willow_register()
     T[("Hades - Looking for a Deal", "on_play")] = _hades_what_dya_say
@@ -536,6 +707,15 @@ def register() -> None:
     T[("Stitch - Carefree Surfer", "on_play")] = _stitch_ohana
     A["World's Greatest Criminal Mind"] = _worlds_greatest_criminal_mind
 
+    # --- Deck 4 ---
+    T[("Aladdin - Doing His Part", "on_play")] = _aladdin_doing_his_part
+    E.ACTIVATED_ABILITY_LEGALITY["GOOD AIM"] = _angel_good_aim_legal
+    ACT["GOOD AIM"] = _angel_good_aim
+    T[("Angela - Night Warrior", "on_play")] = _angel_night_warrior
+    E.STATIC_CARD_RESOLVERS.add("Angela - Night Warrior")
+    T[("Rapunzel - Tower Defender", "on_play")] = _rapunzel_tower_defender
+    ACT["WHAT DID YOU NEED?"] = _launchpad_what_did_you_need
+
     # Mickey Mouse's Secret Path is an ally-broadcast trigger.
     T[("Mickey Mouse - Expedition Leader", "on_ally_quest")] = _mickey_expedition_leader_secret_path
     ACT["GOOD DOG"] = _pluto_good_dog
@@ -548,6 +728,10 @@ def register() -> None:
     T[("Elinor - Renowned Diplomat", "on_end_of_turn")] = _elinor_coordinated_efforts
     T[("Mike Wazowski - Heroic Climber", "on_play")] = _mike_find_a_friend
     T[("Mike Wazowski - Heroic Climber", "on_quest")] = _mike_find_a_friend
+    T[("Chernabog - Unnatural Force", "on_play")] = _chernabog_unatural_force
+    T[("Meilin Lee - Losing Control", "on_play")] = _meilin_losing_control
+    T[("Milo Thatch - Getting His Hands Dirty", "on_play")] = _milo_getting_his_hands_dirty
+    T[("Milo Thatch - Getting His Hands Dirty", "on_end_of_turn")] = _milo_discard_recovery
     T[("Mowgli - Man Cub", "on_play")] = _mowgli_have_a_better_look
     T[("Nani - Stage Manager", "on_play")] = _nani_thats_your_cue
     T[("The Queen - Devious Disguise", "on_play")] = _queen_devious_disguise_evil_scheme

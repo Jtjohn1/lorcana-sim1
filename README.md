@@ -4,22 +4,22 @@ A Python engine for Disney Lorcana that can play full legal games
 autonomously, aimed at eventually running bot-vs-bot self-play to
 evaluate and evolve decks (like a chess engine, but for Lorcana).
 
-Built from the Comprehensive Rules v2.2.0 (effective July 9, 2026) and
-LorcanaJSON card data for sets 9–13 (Fabled, Whispers in the Well,
-Winterspell, Wilds Unknown, Attack of the Vine!) — 1,294 cards total.
+Built against Comprehensive Rules v2.3.0 (effective October 16, 2026)
+and LorcanaJSON card data for sets 9–14 (Fabled through Hyperia City) —
+1,558 cards total.
 
-## Status: engine skeleton, not a finished game
+## Status: rules engine under active development
 
-Full legal games run start-to-finish (see `self_play.py`), but a large
-share of Lorcana's actual complexity is *unique per-card text*, which
-isn't scripted yet. See "Known gaps" below before assuming a game
-result reflects real strategy.
+The simulator runs complete games for the mechanics and card effects it
+implements. Many unique card abilities are still missing, so game results
+do not yet represent the full card pool. See "Known gaps" before using
+results for strategy or deck evaluation.
 
 ## Layout
 
 ```
 data/
-  raw/setdata_9.json ... setdata_13.json   # source LorcanaJSON dumps
+  raw/setdata_9.json ... setdata_14.json   # source LorcanaJSON dumps
   build_card_db.py                          # merges raw/ -> cards.json
   cards.json                                # compiled, normalized card DB
 lorcana/
@@ -30,7 +30,7 @@ lorcana/
   decklist.py    # parse "N Card Name" decklist text files into card id lists
   deck_utils.py  # build_random_deck() — legality-only random decks for testing
 data/decklists/
-  deck1.txt, deck2.txt  # the two 60-card decks provided in-session (see below)
+  deck1.txt–deck11.txt  # supplied and exploratory 60-card decklists
 bots/
   random_bot.py     # uniformly random legal move (correctness baseline)
   heuristic_bot.py  # cheap priority rules, no search
@@ -53,34 +53,27 @@ pass its path to `--deck-a`/`--deck-b`.
 
 ## The open-hands / open-decks config
 
-`lorcana.state.GameConfig` has two flags:
+`GameConfig.open_hands` and `open_decks` control what `GameState.view_for(player)`
+reports. Both default to `False`; set both to `True` for deliberate
+perfect-information experiments.
 
-- `open_hands` — if `True`, `GameState.view_for(player)` includes the
-  opponent's hand contents, not just its count.
-- `open_decks` — if `True`, `view_for()` includes both players' full
-  deck order, not just deck size.
+The engine and bots receive the full internal `GameState`. `RandomBot`
+chooses among legal moves, and `HeuristicBot` scores public board state and
+its own hand. In hidden mode, `SearchBot` averages each root action across
+four sampled positions by default. It keeps the acting player's hand fixed,
+shuffles that player's deck order, and shuffles the opponent's hidden hand
+and deck together.
 
-**Both default to `True`.** This makes the game perfect-information by
-default: no hidden information to model, so a search algorithm (minimax,
-MCTS, etc.) can look at the whole game tree directly instead of needing
-determinization/sampling over unknown hands and draws.
-
-Important nuance: **the engine and the bundled bots don't currently call
-`view_for()` at all** — they operate on the real `GameState` directly,
-which already has full access to everything. `view_for()` only matters
-once something needs a *restricted* picture (a human opponent, or an
-experiment in hidden-information search). Turning `open_hands`/
-`open_decks` to `False` today changes what `view_for()` reports; it
-doesn't yet change what a bot can see, since no bot consults it. Wiring
-the bots through `view_for()` — and giving them a sampling/determinization
-strategy for the hidden case — is a real next step, not a config flip.
-
+The search samples from the simulator's actual remaining card pool for each
+player. It no longer sees the opponent's exact hand or draw order, but it
+still knows the opponent's unseen card composition. `view_for()` is a
+redacted data view, not a sandbox for custom bots that receive `GameState`.
 ## What's implemented
 
 - Full turn structure: Start-of-Turn (ready / set / draw) → Main Phase →
-  End-of-Turn, matching Comprehensive Rules section 3, including
-  `on_start_of_turn` and `on_end_of_turn` broadcast hooks for card text
-  tied to those moments.
+  End-of-Turn, including queued Start, Ready, challenge, banishment,
+  movement, ink-drop, and end-of-turn trigger hooks. Registered triggers
+  use active-player ordering and their controller chooses resolution order.
 - Turn actions: ink, play character/item/location/action, quest,
   challenge (character or location), move to a location, activate an
   activated ability, Boost, end turn.
@@ -89,20 +82,16 @@ strategy for the hidden case — is a real next step, not a config flip.
   change.
 - Win/loss conditions: 20+ lore, deck-out at end of turn.
 - Game state checks: banishment via damage ≥ willpower (including
-  discarding anything Boosted under a banished character), checked
-  after every action.
-- Keywords implemented mechanically: **Rush, Evasive, Alert, Bodyguard
-  (including its "may enter play exerted" choice, generalized to any
-  card whose text says that — e.g. Mickey Mouse's Long Journey),
-  Challenger, Resist, Reckless** (including its "can't end turn" lock),
-  **Support, Boost, Shift** (base, `[Classification] Shift`,
-  `Universal Shift`), **Singer, Sing Together** (simplified — see
-  gaps). Singing now correctly follows the universal rule (5.4.4.2: ANY
-  character with cost ≥ the song's cost can sing it, not just ones with
-  the Singer keyword) — this was a real bug in the first version of this
-  engine, fixed this session. **Ward** is tracked as a flag but has no
-  effect yet since no targeted effects need blocking (Ward doesn't block
-  challenges per the rules anyway).
+  discarding anything Boosted under a banished character), checked after
+  actions and at the challenge declaration/damage checkpoints. Characters
+  are unassigned when their location leaves play.
+- Keywords implemented mechanically include **Rush, Evasive, Alert,
+  Bodyguard, Challenger, Resist, Reckless, Support, Boost, all six Shift
+  variants, Singer, Sing Together, Adventurous, and Ward**. Sing Together
+  offers each legal subset of ready, dry characters. Ink-drop counters can
+  be gained and spent alone or mixed with ink cards. Ward filters targets
+  an opponent may choose while resolving an effect; it does not prevent
+  challenges or effects that do not choose a target.
 - A **target-selection / sub-decision framework**: `GameState.choose(player_idx,
   kind, options)` — falls back to a random pick if nothing's wired up, or
   calls `state.decision_maker(state, player_idx, kind, options)` if set
@@ -118,29 +107,34 @@ strategy for the hidden case — is a real next step, not a config flip.
   from multiple sources (per-turn statics like Grandmother Willow,
   activated abilities like Hamm/Lantern/Pluto, triggered ones like
   Aurora), consumed by the next character played for ink.
-- **Two temporary-modifier ledgers**: `state.temp_strength_bonus`
+- **Two Strength-modifier ledgers**: `state.temp_strength_bonus`
   ("this turn," cleared at your End-of-Turn) and
   `state.delayed_strength_mods` ("until the start of your next turn,"
-  survives the opponent's whole turn — e.g. Mickey Mouse's Secret Path).
+  survives the opponent's whole turn). Supported modifiers carry through
+  Shift stacks.
 - **Dynamic Lore/damage-source hooks**: `STATIC_LORE_MODIFIERS` (e.g.
   The Queen's Jealous Heart) and `STATIC_DAMAGE_SOURCE_OVERRIDE` (e.g.
   Dale's Spike Suit — challenge damage uses Willpower instead of
   Strength for that controller's characters).
 - **`STATIC_READY_BLOCKERS`**: a card can prevent its own instance from
   readying based on a live condition (e.g. Demona's Stone by Day).
-- **`lorcana/card_effects.py`** scripts every unique card (beyond generic
-  keywords) across the two decklists provided this session — 21 cards'
-  worth of triggered/static/activated abilities, action-card effects,
-  and one Boost interaction. This is the reference set to copy the
-  pattern from for any other card.
+- **`lorcana/card_effects.py`** contains handlers for selected abilities in
+  decklists 1–4, plus one Boost interaction. Some implementations are
+  simplified or omit options; see the interpretation notes and Known gaps
+  below before treating a listed card effect as fully faithful. This is the
+  reference pattern for adding more handlers.
+- **A narrow generic text fallback** resolves simple draw, lore, and
+  ink-drop triggers/activated abilities, including optional draw, plus
+  exact simple action effects. More complex or conditional effects still
+  need scripts.
 
 ## Decks validated this session
 
-`data/decklists/deck1.txt` and `deck2.txt` — two 60-card decks provided
-directly, now fully scripted (every card either uses a generic keyword
-or has a handler in `card_effects.py`). 400+ self-play games run against
-each other (random-vs-random and heuristic-vs-heuristic) with zero
-crashes. One thing worth flagging honestly rather than burying: with
+`data/decklists/deck1.txt` through `deck4.txt` pass the resolver audit.
+A 10-game HeuristicBot mirror smoke run on deck4 completed with no
+turn-limit games. Earlier 400+ game results on decks1–2 predate this rules
+expansion and do not establish complete card-effect fidelity.
+One thing worth flagging honestly rather than burying: with
 `HeuristicBot` on both sides, deck2 won roughly 92% of games (184/200)
 versus a much more even ~53%/47% split under `RandomBot`. `HeuristicBot`
 is a simple priority-scoring bot with no lookahead, and its scoring
@@ -187,7 +181,7 @@ alpha-beta pruning over the action-level game tree (each ply is one
 atomic action from `legal_actions`, not a whole turn). It uses
 `GameState.clone()` — a hand-written cheap copy that shares the card
 database by reference instead of deep-copying it — rather than
-`copy.deepcopy`, since the latter would duplicate the ~1,300-card
+`copy.deepcopy`, since the latter would duplicate the ~1,558-card
 database on every simulated node.
 
 Getting this working correctly surfaced two real bugs worth knowing
@@ -264,16 +258,14 @@ last *fully completed* depth's answer is still used rather than nothing.
   deck1-vs-deck2 win-rate question from the previous session with a bot
   whose verdicts can be trusted.
 
-### New decklists (not yet scripted)
+### New decklists (coverage in progress)
 
 `data/decklists/deck3.txt` through `deck11.txt` — nine more 60-card
-decks provided in-session, all fully present in the sets 9–13 database
-(no missing cards). None of their unique abilities are scripted in
-`card_effects.py` yet (only deck1/deck2's 21 cards are) — playing these
-decks today means every card not covered by a generic keyword behaves
-as a no-op (still legal to play, costs what it costs, but its printed
-text does nothing). Scripting these is the natural next "step 1" pass,
-independent of the search-bot work above.
+decks, all fully present in the sets 9–14 database (no missing cards).
+Decks1–4 pass the resolver audit (22/22, 18/18, 17/17, and 19/19 unique
+cards). Decks5–11 still contain unsupported text. Run
+`check_card_coverage.py --deck ... --require-resolved-effects` before using
+a deck for fitness experiments.
 
 ## A learned (Transformer) evaluation function
 
@@ -362,59 +354,59 @@ have enough signal yet," which the evidence above actually supports.
 
 ## Known gaps (the real work is here)
 
-This is the honest list of what's *not* done — each is a reasonable next
-project session, not a bug:
+The engine still needs more work before large self-play results can be
+trusted:
 
-1. **Most of the ~1,294 cards' unique triggered abilities and action-card
-   effect texts are still not scripted** — only the ~21 cards across the
-   two decklists provided this session have handlers in
-   `card_effects.py`. Everything else's text is present as structured
-   data (`Card.abilities`, `Card.full_text`) but not executed —
-   unscripted action cards resolve as a no-op (still cost their ink,
-   still go to discard) and unscripted triggered abilities never fire.
-   This is the long tail — script whatever deck you're testing next,
-   following the patterns already in `card_effects.py`.
-2. **No "the bag."** The real game queues triggered abilities and lets
-   players choose resolution order (7.7). The engine currently resolves
-   each triggered ability immediately/synchronously as it fires, which
-   is observably different from the real game only in edge cases with
-   multiple simultaneous triggers needing player-chosen ordering — none
-   of the 21 scripted cards hit that edge case, but a future card might.
-3. **The temporary-modifier ledgers only cover Strength and Lore.** Real
-   card text can modify Willpower, grant/remove keywords temporarily,
-   forbid actions ("can't be challenged"), etc. Extend
-   `delayed_strength_mods`'s pattern (or add a sibling ledger) as new
-   effects need it, rather than building a separate one-off mechanism
-   per card.
-4. **Shift variants Duo/Combo/Temporary/Potato Shift aren't implemented**
-   (only base Shift, `[Classification] Shift`, `Universal Shift`).
-   Cards with these keywords simply can't use them yet (`_has_unsupported_shift`
-   filters them out of legal actions); they can still be played for
-   their normal ink cost.
-5. **Target selection only handles "pick one from a list."** "Choose up
-   to N," multi-step "opponent then chooses," and damage-calculation-
-   then-choice ordering (6.7.2 in the rules) aren't built out — every
-   handler in `card_effects.py` so far only needed single choices.
-6. **Sing Together is a simplification.** The real rule lets you pick
-   *any subset* of ready dry characters whose combined cost meets the
-   threshold; this engine currently offers one action that sings with
-   *all* eligible characters at once rather than enumerating subsets
-   (combinatorial otherwise). Fine for a bot that doesn't need the
-   unused characters for anything else this turn; wrong if it does.
-7. **No mulligan step.** Setup draws 7 and starts the game; `2.2.2`
-   (looking at your hand and replacing any number of cards before the
-   game begins) isn't implemented. `GameConfig.allow_mulligan` exists as
-   a placeholder flag but currently does nothing.
-8. **Deck construction is legality-only, not strategic**
-   (`deck_utils.build_random_deck` — random colors, random fill, no
-   curve-shaping or synergy). Real decks (see `data/decklists/`) are
-   loaded via `decklist.py` instead — that's a parser, not a builder.
-   Actual deckbuilding intelligence is still the roadmap's step 3.
-9. **Multiplayer (`section 9`) and Ward's actual interaction with
-   targeted effects are unimplemented.** No scripted card here targets
-   through Ward, so this hasn't been exercised yet.
-10. **A few specific simplifications** are called out where they happen —
-    see "Interpretation calls made while scripting" above.
+1. **Most unique card abilities are not scripted.** The database contains
+   1,558 cards, but only a subset of their printed effects have resolvers.
+   Exact generic templates cover common draw/discard, damage, healing,
+   banish, and other simple effects. Unrecognized action effects still
+   resolve as no-ops, and unrecognized triggers do not fire.
+2. **Triggered-ability infrastructure is partial.** Registered triggers
+   are queued and resolve in active-player order, with their controller
+   choosing the order. Start, Ready, challenge, banishment, and end-of-turn
+   timing windows are represented. Most card texts still need handlers, and
+   simultaneous multi-step effects need more scenario coverage.
+3. **Temporary modifiers cover only some characteristics.** Strength, Lore,
+   Challenger, and Resist have selected temporary-effect support. General
+   temporary changes to Willpower, keywords, and action restrictions are
+   still missing.
+4. **Deck evolution is limited.** Its mutation pool now excludes cards with
+   unresolved text, and it refuses seed/opponent decks with unresolved effects.
+   Decks1–4 pass the resolver-presence gate (22/22, 18/18, 17/17, and
+   19/19 unique cards); the audit cannot certify handler fidelity.
+5. **Multiplayer is not implemented.** Games currently have two players.
+6. **Hidden-card sampling still knows the opponent's unseen pool.**
+   SearchBot samples unknown hand/deck positions, but uses the simulator's
+   actual remaining card multiset as its prior. It needs a public-evidence
+   deck-composition model for unknown opposing decklists. Custom bots still
+   receive the full `GameState`.`
+7. **Some card effects and ordering choices need more coverage.** The
+   engine has a choice hook, but not every multi-step choice and resolution
+   process is represented yet.
+
+### Card-effect coverage
+
+Run `check_card_coverage.py` to audit the sets 9–14 database or a specific
+decklist. It reports whether each structured ability and action text has a
+known engine resolver; it does not certify that each handler is fully faithful.
+Currently, 407 of 1,558 card records have a resolver for all their parsed
+text. Decks1–4 pass the audit for all unique cards (22/22, 18/18, 17/17,
+and 19/19), but this only confirms that a resolver is registered; it does
+not confirm that every interaction matches the Comprehensive Rules.
+
+### Deck evolution runner
+
+`deck_evolution.py` checks deck legality and refuses to score a seed or
+opponent deck that contains unresolved card text. By default, its mutation
+pool includes every card with a known resolver across sets 9–14; `--pool`
+can restrict it to one or more decklists. Decks1–4 pass the narrow resolver
+gate, but global card coverage and bot-play validation remain incomplete,
+so overnight fitness runs are not ready.
+
+Once the chosen decks pass the coverage audit, the bounded runner can be
+started with one generation, a small population, and paired games. Use
+`--seed-deck`, `--opponent-deck`, `--pool`, `--bot`, and `--output` to configure it.
 
 ## Suggested next steps, in order
 
@@ -426,19 +418,20 @@ project session, not a bug:
    double-check anything that looks like a keyword against the
    Comprehensive Rules section it cites before assuming the card text
    alone tells the whole story.
-2. Once a decent slice of cards have real effects, replace
-   `HeuristicBot` with a real search-based bot (minimax/MCTS) — the
-   engine is perfect-information by default (open hands/decks), which
-   makes this tractable without hidden-information modeling. The deck1-
-   vs-deck2 win-rate skew above is a good first test case: does a
-   smarter bot close the gap?
-3. Only after the engine covers enough real cards to matter: build the
-   actual deck-optimization loop (genetic algorithm over legal decks,
-   fitness = self-play win rate).
+2. Improve SearchBot's hidden-information handling. It now samples unknown
+   card positions for root decisions, but still assumes the opponent's true
+   remaining card pool and sub-decision hooks receive the full `GameState`.
+3. Grow the scripted card pool, then use the bounded evolution runner
+   across multiple opponents and balanced seat assignments before any
+   long optimization run.
 
 ## Validation done so far
 
-840+ self-play games total across this project's two sessions:
+Focused engine-rule checks pass, covering sets 9–14, ink-drop payments,
+owner-turn drying, Shift variants, Sing Together subsets, Adventurous,
+Ward, opening-hand replacement, triggered timing, bot action legality,
+and legal deck mutation. Earlier project work also recorded 840+ self-play
+games across the two included 60-card decks and legality-only random decks:
 440+ with random 2-color decks (random-vs-random and heuristic-vs-
 heuristic), and 400+ using the two real 60-card decklists in
 `data/decklists/` against each other (both bot types) — zero crashes,
@@ -457,5 +450,4 @@ check rather than trusting the self-play log alone.
 This covers "does the engine stay internally consistent and execute the
 scripted card text correctly," not "does it play good Lorcana" — that's
 what roadmap step 2 is for.
-#   l o r c a n a - s i m  
- 
+#
